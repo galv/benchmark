@@ -71,6 +71,7 @@ def _run_timm(args: List[str]) -> None:
     main(runner=TimmRunner(), args=args)
 
 
+# TODO: Just try runningt his as is
 def _run_torchbench(args: List[str]) -> None:
     try:
         # OSS Import
@@ -103,8 +104,10 @@ class PT2SysArgvManager:
 
 
 def run(args: Optional[List[str]] = None):
+    # import ipdb; ipdb.set_trace()
     if args is None:
         args = sys.argv[1:]
+    print(f"GALVEZ:{args=}")
     model_set = _get_model_set_by_model_name(args)
     with PT2SysArgvManager(args):
         if model_set == "huggingface":

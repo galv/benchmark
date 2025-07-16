@@ -12,6 +12,8 @@ class Model(HuggingFaceModel):
     DEFAULT_EVAL_BSIZE = 1
 
     def __init__(self, test, device, batch_size=None, extra_args=[]):
+        print("GALVEZ: batch_size=", batch_size)
+        # import ipdb; ipdb.set_trace()
         super().__init__(
             name="hf_T5_base",
             test=test,

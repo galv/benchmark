@@ -28,7 +28,12 @@ class DemucsWrapper(torch.nn.Module):
 
     def forward(self, streams) -> Tuple[Tensor, Tensor]:
         sources = streams[:, 1:]
+        print("GALVEZ: pre sources", sources.data_ptr())
         sources = self.augment(sources)
+        print("GALVEZ: post sources", sources.data_ptr())
+        # demucs is problematic because it is returning a tensor that
+        # is contained within an input tensor... This is rather
+        # problematic for me, isn't it?
         mix = sources.sum(dim=1)
         return sources, self.model(mix)
 

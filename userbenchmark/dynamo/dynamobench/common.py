@@ -694,7 +694,7 @@ def timed(
     batch_size=None,
 ):
     use_xla = tensor_is_on_xla(example_inputs)
-    synchronize()
+    synchronize() # this call to synchronize is causing problems...
 
     if batch_size:
         patch_torch_manual_seed()
@@ -1079,6 +1079,9 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
     tolerance = args.xla_tolerance if args.trace_on_xla else 1e-4
     torch._dynamo.config.repro_tolerance = tolerance
 
+    torch.cuda.nvtx.range_push("profiler_start")
+    torch.cuda.cudart().cudaProfilerStart()
+
     with maybe_profile(args.export_profiler_trace, **args.profile_details) as p:
         if args.export_aot_inductor:
             frozen_model_iter_fn = export_aot_inductor(
@@ -1088,6 +1091,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
             frozen_model_iter_fn = torch._dynamo.run(model_iter_fn)
 
         for rep in trange(args.repeat, desc="running benchmark"):
+            torch.cuda.nvtx.range_push("benchmark")
             inputs = (
                 randomize_input(copy.deepcopy(example_inputs))
                 if should_randomize_input
@@ -1100,6 +1104,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
 
             # interleave the runs to handle frequency scaling and load changes
             with maybe_mark_profile(p=p, mark="expected"):
+                torch.cuda.nvtx.range_push("baseline")
                 timings[rep, 0], expected_output = timed(
                     model,
                     model_iter_fn,
@@ -1109,11 +1114,15 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
                     collect_outputs=args.collect_outputs,
                     batch_size=kwargs.get("batch_size"),
                 )
-
+                torch.cuda.nvtx.range_pop()
             # call mark_step between the 2 calls to make the comparison fair.
             maybe_mark_step(args)
 
             with maybe_mark_profile(p=p, mark="actual"):
+                torch.cuda.nvtx.range_push("experiment")
+                # import nvtx
+                # pr = nvtx.Profile()
+                # pr.enable()
                 timings[rep, 1], actual_output = timed(
                     model,
                     frozen_model_iter_fn,
@@ -1122,7 +1131,9 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
                     times=times,
                     collect_outputs=args.collect_outputs,
                 )
-
+                # pr.disable()
+                torch.cuda.nvtx.range_pop()
+            torch.cuda.nvtx.range_pop()
     if args.export_profiler_trace:
         name = args.profiler_trace_name + "_" + model.name
         if hasattr(args, "rank"):
@@ -1189,6 +1200,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
         for k, v in kwargs["dynamo_stats"].items():
             headers.append(k)
             row.append(v)
+    print(f"GALVEZ: writing outputs to {output_filename}")
     write_outputs(
         output_filename,
         headers,
@@ -1209,6 +1221,9 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
         args,
         get_suite_from_model_iter_fn(model_iter_fn),
     )
+
+    torch.cuda.cudart().cudaProfilerStop()
+    torch.cuda.nvtx.range_pop()
 
     return msg
 
@@ -1714,6 +1729,7 @@ class BenchmarkRunner:
 
     def init_optimizer(self, name, device, params):
         if device == "cuda" and self.args.training and name not in CI_SKIP_OPTIMIZER:
+            # if True:
             if (name in CI_USE_SGD and self.args.ci) or name in BENCHMARK_USE_SGD:
                 self.optimizer = torch.optim.SGD(params, lr=0.01, foreach=True)
                 # Disable multi_tensor_sgd for benchmarking, there isn't a large performance benefit (~1%) to compiling
@@ -1932,8 +1948,11 @@ class BenchmarkRunner:
 
     def run_n_iterations(self, mod, inputs, model_iter_fn):
         n = self.args.iterations
+        # print("GALVEZ:iterations=", n)
         for _ in range(n - 1):
+            # print("GALVEZ:iter=", _)
             model_iter_fn(mod, inputs, collect_outputs=False)
+        # print("GALVEZ:final iter")
         return model_iter_fn(mod, inputs, collect_outputs=True)
 
     @torch._disable_dynamo(recursive=True)
@@ -2030,6 +2049,9 @@ class BenchmarkRunner:
                 limit_all_gathers=True,
                 auto_wrap_policy=self.get_fsdp_auto_wrap_policy(self.args.only),
             )
+
+        # for name, param in model.named_parameters():
+        #     print(f"{name}: data_ptr = {param.data_ptr()}, nbytes = {param.nbytes}")
         return model
 
     def check_accuracy(
@@ -2206,6 +2228,7 @@ class BenchmarkRunner:
             torch._dynamo.utils.counters.clear()
             model_copy = None
             try:
+                # Why is it doing a copy?
                 model_copy = self.deepcopy_and_maybe_parallelize(model)
                 self.init_optimizer(name, current_device, model_copy.parameters())
                 if self.args.export or self.args.export_aot_inductor:
@@ -2219,6 +2242,7 @@ class BenchmarkRunner:
                         new_result = optimized_model_iter_fn(model_copy, example_inputs)
                 else:
                     optimized_model_iter_fn = optimize_ctx(self.model_iter_fn)
+                    # So this could be a failure due to inductor as well...
                     new_result = self.run_n_iterations(
                         model_copy, example_inputs, optimized_model_iter_fn
                     )
@@ -2256,6 +2280,8 @@ class BenchmarkRunner:
                         new_result = process_fn(new_result)
                         fp64_outputs = process_fn(fp64_outputs)
 
+                # print("\nGALVEZ: correct_result=", correct_result)
+                # print("\nGALVEZ: new_result=", new_result)
                 if not same(
                     correct_result,
                     new_result,
@@ -2538,8 +2564,14 @@ class BenchmarkRunner:
                 elif current_device == "hpu":
                     torch.hpu.reset_peak_memory_stats()
                 t0 = time.perf_counter()
+                # It does 5 iterations of warmup... Hmmm... But I see replay_dynamic 5 times...
+                # Maybe I should comment this out...
                 for _ in range(niters):
+                    # So this itself was failing the whole time.
+                    print("warmup iter", _)
                     fn(model, example_inputs)
+                    torch.cuda.synchronize()
+                    # print("warmup iter done", _)
                 t1 = time.perf_counter()
                 latency = t1 - t0
                 if current_device == "cuda":
@@ -2599,6 +2631,7 @@ class BenchmarkRunner:
                         niters=1,
                     )
 
+            # Here is where optimize_ctx is called!
             if self.args.export_aot_inductor:
                 optimized_model_iter_fn = optimize_ctx
             else:
@@ -2607,6 +2640,8 @@ class BenchmarkRunner:
             with maybe_snapshot_memory(
                 self.args.snapshot_memory, f"compiled_{self.args.only}"
             ):
+                # example_inputs is the same in every iteration... But
+                # I suppose that the outputs do change...
                 dynamo_latency, dynamo_peak_mem, dynamo_stats = warmup(
                     optimized_model_iter_fn, model, example_inputs, "dynamo"
                 )
@@ -2652,6 +2687,7 @@ class BenchmarkRunner:
             if self.args.print_compilation_time:
                 print(f"Compilation time: {compilation_time:.2f}")
 
+            # I want this one!
             if experiment.func is speedup_experiment:
                 experiment_kwargs["compilation_latency"] = compilation_time
                 experiment_kwargs["compression_ratio"] = compression_ratio
@@ -2754,6 +2790,8 @@ class BenchmarkRunner:
 
         start_stats = get_dynamo_stats()
 
+
+        # Difference between accuracy and tolerance?
         if self.args.accuracy:
             status = self.check_accuracy(
                 name, model, example_inputs, optimize_ctx, experiment, tag
@@ -2767,6 +2805,7 @@ class BenchmarkRunner:
             status = self.check_tolerance(name, model, example_inputs, optimize_ctx)
             print(status)
         elif self.args.performance:
+            # I'm going into this one!
             if self.args.backend == "torchao":
                 status = self.run_performance_test_non_alternate(
                     name, model, example_inputs, optimize_ctx, experiment, tag
@@ -2781,6 +2820,7 @@ class BenchmarkRunner:
                     tag,
                     batch_size=batch_size,
                 )
+            print("GALVEZ: status print")
             print(status)
         empty_gpu_cache(current_device)
 
@@ -3131,6 +3171,7 @@ def parse_args(args=None):
         action="store_true",
         help="print dataframe result used for calculating accuracy",
     )
+    # Do not turn this one on!
     parser.add_argument(
         "--disable-cudagraphs",
         action="store_true",
@@ -3151,6 +3192,7 @@ def parse_args(args=None):
         action="store_true",
         help="Disables divisible by 16 hint to Triton for Inductor",
     )
+    # Want to turn this on?
     parser.add_argument(
         "--inductor-compile-mode",
         default=None,
@@ -3161,6 +3203,7 @@ def parse_args(args=None):
         action="store_true",
         help="Show a warning whenever graph break",
     )
+    # Probably want to turn this on
     parser.add_argument(
         "--log-graph-breaks",
         action="store_true",
@@ -3302,6 +3345,22 @@ def parse_args(args=None):
         "--speedup-dynamo-ts",
         action="store_true",
         help="TorchDynamo frontend with torchscript backend",
+    )
+    group.add_argument(
+        "--speedup-parameterized-cudagraphs",
+        action="store_true",
+        help=(
+            "Compare TorchInductor performance with"
+            " cudagraphs_elide_input_output_copies toggled"
+        ),
+    )
+    group.add_argument(
+        "--speedup-parameterized-cudagraphs-basic",
+        action="store_true",
+        help=(
+            "Compare TorchInductor performance with"
+            " cudagraphs_elide_input_output_copies toggled"
+        ),
     )
     group.add_argument(
         "--speedup-fx2trt", action="store_true", help=help(speedup_experiment_fx2trt)
@@ -3547,7 +3606,7 @@ def run(runner, args, original_dir=None):
         # Use small batch size. We use >1 batch size to ensure we test
         # batch_norm type of operators that work on batch dims.
         # TODO - Go through the failures for batch size = 2
-        if args.batch_size is None:
+        if args.batch_size is None and args.only not in {"hf_T5_base"}:
             if runner.suite_name == "huggingface":
                 args.batch_size = 1
             elif runner.suite_name == "torchbench":
@@ -3589,6 +3648,7 @@ def run(runner, args, original_dir=None):
             "detectron2_fasterrcnn_r_50_fpn",
         }:
             # some of the models do not support use_deterministic_algorithms
+            # Why?
             torch.use_deterministic_algorithms(True)
         if args.devices == ["xpu"]:
             torch.use_deterministic_algorithms(True, warn_only=True)
@@ -3735,10 +3795,12 @@ def run(runner, args, original_dir=None):
     if args.disable_output:
         disable_output = True
 
+    # Which one do I want here?
     if args.overhead:
         optimize_ctx = torch._dynamo.optimize(dummy_fx_compile, nopython=args.nopython)
         experiment = speedup_experiment
         output_filename = "overheads.csv"
+    # Don't I just need to do something like this?
     elif args.inductor:
         inductor_config.debug = args.verbose
         if args.threads:
@@ -3762,6 +3824,83 @@ def run(runner, args, original_dir=None):
         torch._dynamo.mark_dynamic = MagicMock()
         experiment = xla
         output_filename = "xla.csv"
+    elif args.speedup_parameterized_cudagraphs_basic:
+        inductor_config.triton.cudagraphs_elide_input_output_copies = True
+        inductor_config.triton.cudagraph_trees = False
+        inductor_config.triton.cudagraphs = True
+        optimize_ctx = functools.partial(
+            torch.compile,
+            backend="inductor",
+            fullgraph=args.nopython,
+            mode=args.inductor_compile_mode,
+        )
+        experiment = speedup_experiment
+        output_filename = "speedup_parameterized_cudagraphs_basic.csv"
+        # baseline_fn = runner.model_iter_fn
+
+        # def opt_ctx(fn):
+        #     @functools.wraps(fn)
+        #     def wrapped_jit_compiled_fn(*args, **kwargs):
+        #         inductor_config.triton.cudagraphs_elide_input_output_copies = True
+        #         inductor_config.triton.cudagraph_trees = False
+        #         jit_compiled_fn = torch.compile(
+        #             fn,
+        #             backend="inductor",
+        #             fullgraph=args.nopython,
+        #             mode=args.inductor_compile_mode,
+        #         )
+
+        #         return jit_compiled_fn
+        #     return wrapped_jit_compiled_fn
+
+        # optimize_ctx = opt_ctx
+        # experiment = speedup_experiment # todo: consider latency_experiment
+        # output_filename = "speedup_parameterized_cudagraphs_basic.csv"
+    elif args.speedup_parameterized_cudagraphs:
+        inductor_config.triton.cudagraphs = True
+        def compile_with(flag):
+            def inner(fn):
+                    # This returns a function. I think I need a function wrapping this.
+
+                    jit_compiled_fn = torch.compile(
+                        fn,
+                        backend="inductor",
+                        fullgraph=args.nopython,
+                        mode=args.inductor_compile_mode,
+                    )
+
+                    @functools.wraps(jit_compiled_fn)
+                    def wrapped_jit_compiled_fn(*args, **kwargs):
+                        import nvtx
+                        # profile = nvtx.Profile()
+                        # profile.enable()
+                        prev = inductor_config.triton.cudagraphs_elide_input_output_copies
+                        inductor_config.triton.cudagraphs_elide_input_output_copies = flag
+                        prev_cudagraph_trees = inductor_config.triton.cudagraph_trees
+                        inductor_config.triton.cudagraph_trees = not flag
+                        try:
+                            print("pre-compile cudagraph trees:", inductor_config.triton.cudagraph_trees)
+                            return jit_compiled_fn(*args, **kwargs)
+                        finally:
+                            inductor_config.triton.cudagraphs_elide_input_output_copies = prev
+                            inductor_config.triton.cudagraph_trees = prev_cudagraph_trees
+                        # profile.disable()
+                    return wrapped_jit_compiled_fn
+            return inner
+
+        baseline_ctx = compile_with(False)
+        baseline_fn = baseline_ctx(runner.model_iter_fn)
+
+        # needed to avoid error that causes inconsistent timing due to:
+        # Unable to hit fast path of CUDAGraphs because of pending, uninvoked backwards
+        def model_iter_fn_and_mark_step(*args, **kwargs):
+            torch.compiler.cudagraph_mark_step_begin()
+            baseline_fn(*args, **kwargs)
+
+        runner.model_iter_fn = model_iter_fn_and_mark_step
+        optimize_ctx = compile_with(True)
+        experiment = speedup_experiment # todo: consider latency_experiment
+        output_filename = "speedup_parameterized_cudagraphs.csv"
     elif args.speedup_dynamo_ts:
         optimize_ctx = torch._dynamo.optimize("ts", nopython=args.nopython)
         experiment = speedup_experiment
@@ -3782,6 +3921,7 @@ def run(runner, args, original_dir=None):
             nopython=args.nopython,
         )
     elif args.nothing:
+        # This one?
         optimize_ctx = nothing
         experiment = speedup_experiment
         output_filename = "nothing.csv"
@@ -3850,7 +3990,8 @@ def run(runner, args, original_dir=None):
     if args.only in runner.disable_cudagraph_models:
         args.disable_cudagraphs = True
 
-    if args.inductor or args.backend == "inductor" or args.export_aot_inductor:
+    if args.inductor or args.speedup_parameterized_cudagraphs or args.backend == "inductor" or args.export_aot_inductor:
+        print("GALVEZ: inductor path!")
         inductor_config.triton.cudagraphs = not args.disable_cudagraphs
         inductor_config.triton.persistent_reductions = (
             not args.disable_persistent_reductions
@@ -3939,6 +4080,7 @@ def run(runner, args, original_dir=None):
     elif args.only:
         model_name = args.only
         for device in args.devices:
+            # set to 4 for some reason...
             batch_size = args.batch_size
             if args.batch_size_file:
                 batch_size = read_batch_size_from_file(

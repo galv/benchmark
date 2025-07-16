@@ -9,6 +9,7 @@ batch_size:
     hf_T5_base: 4
     timm_efficientdet: 1
     llama_v2_7b_16h: 1
+    # Suspicious!
     # reduced from 16 due to cudagraphs OOM in TorchInductor dashboard
     yolov3: 8
 

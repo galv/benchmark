@@ -45,4 +45,6 @@ def run():
 
 
 if __name__ == "__main__":
+    import torch
+    torch.cuda.memory._record_memory_history(True)
     run()

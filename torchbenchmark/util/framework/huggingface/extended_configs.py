@@ -364,6 +364,7 @@ def generate_inputs_for_model(
                 f"Class {model_name} unsupported for training test "
             )
 
+    import ipdb; ipdb.set_trace()
     return input_dict
 
 
