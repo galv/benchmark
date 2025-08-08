@@ -461,36 +461,36 @@ class TorchBenchmarkRunner(BenchmarkRunner):
             else:
                 return mod(*inputs)
 
-    # def forward_and_backward_pass(self, mod, inputs, collect_outputs=True):
-    #     cloned_inputs = clone_inputs(inputs)
-    #     self.optimizer_zero_grad(mod)
-    #     with self.autocast(**self.autocast_arg):
-    #         if isinstance(cloned_inputs, dict):
-    #             pred = mod(**cloned_inputs)
-    #         else:
-    #             pred = mod(*cloned_inputs)
-    #         loss = self.compute_loss(pred)
-    #     self.grad_scaler.scale(loss).backward()
-    #     self.optimizer_step()
-    #     if collect_outputs:
-    #         return collect_results(mod, None, loss, cloned_inputs)
-    #     return None
-
     def forward_and_backward_pass(self, mod, inputs, collect_outputs=True):
-        # cloned_inputs = clone_inputs(inputs)
-        # self.optimizer_zero_grad(mod)
-        if isinstance(inputs, dict):
-            pred = mod(**inputs)
-        else:
-            pred = mod(*inputs)
-        # loss = self.compute_loss(pred)
-        loss = pred.sum() # / pred.numel()
-        loss.backward()
-        # self.grad_scaler.scale(loss).backward()
-        # self.optimizer_step()
+        cloned_inputs = clone_inputs(inputs)
+        self.optimizer_zero_grad(mod)
+        with self.autocast(**self.autocast_arg):
+            if isinstance(cloned_inputs, dict):
+                pred = mod(**cloned_inputs)
+            else:
+                pred = mod(*cloned_inputs)
+            loss = self.compute_loss(pred)
+        self.grad_scaler.scale(loss).backward()
+        self.optimizer_step()
         if collect_outputs:
-            return collect_results(mod, None, loss, inputs)
+            return collect_results(mod, None, loss, cloned_inputs)
         return None
+
+    # def forward_and_backward_pass(self, mod, inputs, collect_outputs=True):
+    #     # cloned_inputs = clone_inputs(inputs)
+    #     # self.optimizer_zero_grad(mod)
+    #     if isinstance(inputs, dict):
+    #         pred = mod(**inputs)
+    #     else:
+    #         pred = mod(*inputs)
+    #     # loss = self.compute_loss(pred)
+    #     loss = pred.sum() # / pred.numel()
+    #     loss.backward()
+    #     # self.grad_scaler.scale(loss).backward()
+    #     # self.optimizer_step()
+    #     if collect_outputs:
+    #         return collect_results(mod, None, loss, inputs)
+    #     return None
 
     
 

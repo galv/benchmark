@@ -283,6 +283,7 @@ class BenchmarkModel(metaclass=PostInitProcessor):
                 )
         elif self.dargs.accuracy:
             self.batch_size = 4 if self.batch_size > 4 else self.batch_size
+        print("GALVEZ:batch_size=", self.batch_size)
 
     def _load_metadata(self):
         relative_path = self.__class__.__module__.split(".")

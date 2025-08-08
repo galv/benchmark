@@ -46,5 +46,8 @@ def run():
 
 if __name__ == "__main__":
     import torch
-    torch.cuda.memory._record_memory_history(True)
+    # torch.cuda.memory._record_memory_history(True)
+    # order = torch._C._get_sdp_priority_order()
+    # import ipdb; ipdb.set_trace()
+    # torch._C._set_sdp_priority_order([int(torch.nn.attention.SDPBackend.MATH)])
     run()

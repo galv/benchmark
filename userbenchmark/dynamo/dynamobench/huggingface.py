@@ -399,6 +399,14 @@ class HuggingfaceRunner(BenchmarkRunner):
             model = model_cls(config)
         return model
 
+    def _instantiate_model(self, model_cls, config):
+        if "auto" in model_cls.__module__:
+            # Handle auto classes
+            model = model_cls.from_config(config)
+        else:
+            model = model_cls(config)
+        return model
+
     def load_model(
         self,
         device,
@@ -411,7 +419,16 @@ class HuggingfaceRunner(BenchmarkRunner):
         dtype = torch.float32
         reset_rng_state()
         model_cls, config = self._get_model_cls_and_config(model_name)
-        model = self._download_model(model_name)
+        # So we can check for correct gradients without eliminating the dropout computation
+        for attr in dir(config):
+            print(f"GALVEZ:{attr=}, {type(getattr(config, attr))=}")
+            if "drop" in attr and isinstance(getattr(config, attr), float):
+                # setattr(config, attr, 1e-1)
+                # setattr(config, attr, 1e-30)
+                setattr(config, attr, 0.0)
+                pass
+        model = self._instantiate_model(model_cls, config)
+        # model = self._download_model(model_name)
         model = model.to(device, dtype=dtype)
         if self.args.enable_activation_checkpointing:
             model.gradient_checkpointing_enable()
@@ -435,11 +452,6 @@ class HuggingfaceRunner(BenchmarkRunner):
         example_inputs = generate_inputs_for_model(
             model_cls, model, model_name, batch_size, device, include_loss_args=True
         )
-
-        # So we can check for correct gradients without eliminating the dropout computation
-        for attr in dir(config):
-            if "drop" in attr and isinstance(getattr(config, attr), float):
-                setattr(config, attr, 1e-30)
 
         if (
             is_training
