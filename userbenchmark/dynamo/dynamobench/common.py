@@ -1120,6 +1120,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
 
             with maybe_mark_profile(p=p, mark="actual"):
                 torch.cuda.nvtx.range_push("experiment")
+                # nvtx annotations
                 # import nvtx
                 # pr = nvtx.Profile()
                 # pr.enable()
@@ -1729,15 +1730,15 @@ class BenchmarkRunner:
 
     def init_optimizer(self, name, device, params):
         if device == "cuda" and self.args.training and name not in CI_SKIP_OPTIMIZER:
-            # if True:
-            if (name in CI_USE_SGD and self.args.ci) or name in BENCHMARK_USE_SGD:
+            if True:
+            # if (name in CI_USE_SGD and self.args.ci) or name in BENCHMARK_USE_SGD:
                 self.optimizer = torch.optim.SGD(params, lr=0.01, foreach=True)
                 # Disable multi_tensor_sgd for benchmarking, there isn't a large performance benefit (~1%) to compiling
                 # this optimizer because it is a single foreach add, and increases compile time.
                 # After autotuning and fake tensor caching lands, we can enable, becuase the compile time impact will be lower.
                 # Fake Tensor caching: https://github.com/pytorch/pytorch/pull/113873
                 # Autotuning: https://github.com/pytorch/pytorch/issues/117447
-                self.optimizer.step = torch._dynamo.disable(self.optimizer.step)
+                # self.optimizer.step = torch._dynamo.disable(self.optimizer.step)
             else:
                 self.optimizer = torch.optim.Adam(
                     params, lr=0.01, capturable=True, foreach=True

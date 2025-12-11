@@ -152,6 +152,7 @@ def reduce_to_scalar_loss(
 def reduce_to_scalar_loss(out: Any) -> Union[torch.Tensor, float]:
     """Reduce the output of a model to get scalar loss"""
     if isinstance(out, torch.Tensor):
+        # This is the loss function. Sum and divide
         # Mean does not work on integer tensors
         return out.sum() / out.numel()
     elif isinstance(out, (list, tuple)):
